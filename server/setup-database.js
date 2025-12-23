@@ -258,13 +258,31 @@ class SetupDatabase {
                 response.end();
             });
 
-            tempServer = app.listen(port, hostname, () => {
-                log.info("setup-database", `Starting Setup Database on ${port}`);
-                let domain = (hostname) ? hostname : "localhost";
-                log.info("setup-database", `Open http://${domain}:${port} in your browser`);
-                log.info("setup-database", "Waiting for user action...");
-            });
+            // On Vercel, export the app instead of listening
+            if (process.env.VERCEL) {
+                log.info("setup-database", "Running on Vercel - setup database app will be served via Vercel");
+                // Store the app so it can be exported
+                this.setupApp = app;
+                // Don't wait for user action on Vercel - resolve immediately
+                // The app will be served by Vercel
+                resolve();
+            } else {
+                tempServer = app.listen(port, hostname, () => {
+                    log.info("setup-database", `Starting Setup Database on ${port}`);
+                    let domain = (hostname) ? hostname : "localhost";
+                    log.info("setup-database", `Open http://${domain}:${port} in your browser`);
+                    log.info("setup-database", "Waiting for user action...");
+                });
+            }
         });
+    }
+
+    /**
+     * Get the setup Express app (for Vercel)
+     * @returns {express.Application|null} The Express app if setup is needed, null otherwise
+     */
+    getSetupApp() {
+        return this.setupApp || null;
     }
 }
 
