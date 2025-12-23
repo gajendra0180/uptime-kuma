@@ -177,13 +177,20 @@ let needSetup = false;
     // Check if is chosen a database type
     globalSetupDatabase = new SetupDatabase(args, server);
     if (globalSetupDatabase.isNeedSetup()) {
-        // Hold here and start a special setup page until user choose a database type
-        // On Vercel, the setup app will be stored and exported instead of listening
-        await globalSetupDatabase.start(hostname, port);
-        
-        // Export setup app for Vercel if it exists
-        if (process.env.VERCEL && globalSetupDatabase.getSetupApp()) {
-            module.exports.setupApp = globalSetupDatabase.getSetupApp();
+        // On Vercel, auto-configure SQLite and skip setup server
+        if (process.env.VERCEL) {
+            log.info("server", "Running on Vercel - auto-configuring SQLite");
+            Database.writeDBConfig({
+                type: "sqlite",
+            });
+            // Still create the setup app so user can access setup page if needed
+            await globalSetupDatabase.start(hostname, port);
+            if (globalSetupDatabase.getSetupApp()) {
+                module.exports.setupApp = globalSetupDatabase.getSetupApp();
+            }
+        } else {
+            // Hold here and start a special setup page until user choose a database type
+            await globalSetupDatabase.start(hostname, port);
         }
     }
 
@@ -192,7 +199,11 @@ let needSetup = false;
         await initDatabase(testMode);
     } catch (e) {
         log.error("server", "Failed to prepare your database: " + e.message);
-        process.exit(1);
+        // On Vercel, don't exit - let the error be handled by the app
+        if (!process.env.VERCEL) {
+            process.exit(1);
+        }
+        throw e;
     }
 
     // Database should be ready now
