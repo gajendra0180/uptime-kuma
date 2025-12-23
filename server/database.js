@@ -223,24 +223,9 @@ class Database {
 
         let config = {};
 
-        let parsedMaxPoolConnections = parseInt(process.env.UPTIME_KUMA_DB_POOL_MAX_CONNECTIONS);
-
-        if (!process.env.UPTIME_KUMA_DB_POOL_MAX_CONNECTIONS) {
-            parsedMaxPoolConnections = 10;
-        } else if (Number.isNaN(parsedMaxPoolConnections)) {
-            log.warn("db", "Max database connections defaulted to 10 because UPTIME_KUMA_DB_POOL_MAX_CONNECTIONS was invalid.");
-            parsedMaxPoolConnections = 10;
-        } else if (parsedMaxPoolConnections < 1) {
-            log.warn("db", "Max database connections defaulted to 10 because UPTIME_KUMA_DB_POOL_MAX_CONNECTIONS was less than 1.");
-            parsedMaxPoolConnections = 10;
-        } else if (parsedMaxPoolConnections > 100) {
-            log.warn("db", "Max database connections capped to 100 because Mysql/Mariadb connections are heavy. consider using a proxy like ProxySQL or MaxScale.");
-            parsedMaxPoolConnections = 100;
-        }
-
         let mariadbPoolConfig = {
             min: 0,
-            max: parsedMaxPoolConnections,
+            max: 10,
             idleTimeoutMillis: 30000,
         };
 
@@ -249,8 +234,17 @@ class Database {
         if (dbConfig.type === "sqlite") {
 
             if (! fs.existsSync(Database.sqlitePath)) {
-                log.info("server", "Copying Database");
-                fs.copyFileSync(Database.templatePath, Database.sqlitePath);
+                // Check if template exists
+                if (fs.existsSync(Database.templatePath)) {
+                    log.info("server", "Copying Database");
+                    fs.copyFileSync(Database.templatePath, Database.sqlitePath);
+                } else {
+                    log.warn("server", `Template database not found at ${Database.templatePath}, creating empty database`);
+                    // Create empty SQLite database - migrations will create tables
+                    const sqlite3 = require("@louislam/sqlite3");
+                    const db = new sqlite3.Database(Database.sqlitePath);
+                    db.close();
+                }
             }
 
             const Dialect = require("knex/lib/dialects/sqlite3/index.js");
@@ -423,6 +417,17 @@ class Database {
         // https://knexjs.org/guide/migrations.html
         // https://gist.github.com/NigelEarle/70db130cc040cc2868555b29a0278261
         try {
+            // For SQLite, check if base tables exist - if not, initialize them first
+            if (Database.dbConfig.type === "sqlite") {
+                const hasTable = await R.hasTable("docker_host");
+                if (!hasTable) {
+                    log.info("db", "SQLite database is empty, initializing base tables...");
+                    const { createTables } = require("../db/knex_init_db");
+                    await createTables();
+                    log.info("db", "Base tables created successfully");
+                }
+            }
+
             // Disable foreign key check for SQLite
             // Known issue of knex: https://github.com/drizzle-team/drizzle-orm/issues/1813
             if (Database.dbConfig.type === "sqlite") {
@@ -826,7 +831,9 @@ class Database {
         await Settings.set("migrateAggregateTableState", "migrating");
 
         let progressPercent = 0;
-        for (const [ i, monitor ] of monitors.entries()) {
+        let part = 100 / monitors.length;
+        let i = 1;
+        for (let monitor of monitors) {
             // Get a list of unique dates from the heartbeat table, using raw sql
             let dates = await R.getAll(`
                 SELECT DISTINCT DATE(time) AS date
@@ -837,7 +844,7 @@ class Database {
                 monitor.monitor_id
             ]);
 
-            for (const [ dateIndex, date ] of dates.entries()) {
+            for (let date of dates) {
                 // New Uptime Calculator
                 let calculator = new UptimeCalculator();
                 calculator.monitorID = monitor.monitor_id;
@@ -853,7 +860,7 @@ class Database {
                 `, [ monitor.monitor_id, date.date ]);
 
                 if (heartbeats.length > 0) {
-                    msg = `[DON'T STOP] Migrating monitor ${monitor.monitor_id}s' (${i + 1} of ${monitors.length} total) data - ${date.date} - total migration progress ${progressPercent.toFixed(2)}%`;
+                    msg = `[DON'T STOP] Migrating monitor data ${monitor.monitor_id} - ${date.date} [${progressPercent.toFixed(2)}%][${i}/${monitors.length}]`;
                     log.info("db", msg);
                     migrationServer?.update(msg);
                 }
@@ -862,14 +869,15 @@ class Database {
                     await calculator.update(heartbeat.status, parseFloat(heartbeat.ping), dayjs(heartbeat.time));
                 }
 
-                // Calculate progress: (current_monitor_index + relative_date_progress) / total_monitors
-                progressPercent = (i + (dateIndex + 1) / dates.length) / monitors.length * 100;
+                progressPercent += (Math.round(part / dates.length * 100) / 100);
 
                 // Lazy to fix the floating point issue, it is acceptable since it is just a progress bar
                 if (progressPercent > 100) {
                     progressPercent = 100;
                 }
             }
+
+            i++;
         }
 
         msg = "Clearing non-important heartbeats";
